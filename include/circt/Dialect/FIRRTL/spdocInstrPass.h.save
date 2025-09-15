@@ -1,0 +1,46 @@
+#ifndef CIRCT_DIALECT_FIRRTL_SPDOCINSTRPASS_H  
+#define CIRCT_DIALECT_FIRRTL_SPDOCINSTRPASS_H  
+  
+#include "mlir/IR/Operation.h"  
+#include "mlir/IR/SymbolTable.h"  
+#include "mlir/Pass/Pass.h"  
+#include "llvm/ADT/DenseMap.h"  
+#include "llvm/ADT/StringRef.h"  
+#include "llvm/Support/Process.h"  
+#include "llvm/Support/raw_ostream.h"  
+#include "circt/Dialect/FIRRTL/FIRRTLOps.h"  
+#include "circt/Dialect/FIRRTL/FIRRTLTypes.h"  
+#include "mlir/IR/BuiltinOps.h"
+  
+namespace circt {  
+namespace firrtl {  
+  
+#define GEN_PASS_DECL_SPDOCINSTRPASS  
+#include "circt/Dialect/FIRRTL/Passes.h.inc"  
+  
+struct SpdocInstrPass : public mlir::PassWrapper<SpdocInstrPass, mlir::OperationPass<ModuleOp>> {  
+StringRef getArgument() const override { return "firrtl-spdoc-instr"; }
+public:  
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SpdocInstrPass);
+  SpdocInstrPass() = default;
+  SpdocInstrPass(const SpdocInstrPass &other) : PassWrapper(other) {}
+  void runOnOperation() override;  
+  StringRef getArgument() const override;
+private:  
+  // Helper method to check if debug mode is enabled  
+  bool isDebugEnabled();  
+    
+  // Helper method to find the top-level module  
+  FModuleLike findTopModule(CircuitOp circuitOp);  
+    
+  // Maps to store module information  
+  llvm::DenseMap<StringAttr, Operation*> modules;  
+};  
+  
+// Declaration of the pass registration function  
+std::unique_ptr<mlir::Pass> createspdocInstrPass();  
+  
+} // namespace firrtl  
+} // namespace circt  
+  
+#endif // CIRCT_DIALECT_FIRRTL_SPDOCINSTRPASS_H

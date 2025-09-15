@@ -24,10 +24,13 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/SymbolTable.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/ADT/DenseMapInfo.h"
+#include "llvm/ADT/Hashing.h"
 
 namespace mlir {
 class PatternRewriter;
 } // end namespace mlir
+
 
 namespace circt {
 namespace firrtl {
@@ -37,7 +40,7 @@ class Forceable;
 class ClassLike;
 class ClassType;
 
-/// This holds the name and type that describes the module's ports.
+// This holds the name and type that describes the module's ports.
 struct PortInfo {
   StringAttr name;
   Type type;
@@ -118,6 +121,52 @@ verifyTypeAgainstClassLike(ClassLike classOp, ClassType type,
 
 } // namespace firrtl
 } // namespace circt
+
+template<>  
+struct llvm::DenseMapInfo<circt::firrtl::PortInfo> {
+    static inline circt::firrtl::PortInfo getEmptyKey() {  
+        //static mlir::MLIRContext dummyContext;
+        static mlir::MLIRContext *dummyContext = []() {
+            auto *ctx = new mlir::MLIRContext();
+            // 防止上下文被意外初始化或加载不必要的方言
+            ctx->allowUnregisteredDialects();
+            return ctx;
+        }();
+        mlir::Type sentinelType = mlir::IntegerType::get(dummyContext, 1);
+
+        return circt::firrtl::PortInfo(  
+            mlir::StringAttr::get(dummyContext, "EMPTY_KEY"),
+            sentinelType,  //where problem goes, fixing
+            circt::firrtl::Direction::In  
+        );  
+    }  
+    static inline circt::firrtl::PortInfo getTombstoneKey() {  
+        static mlir::MLIRContext *dummyContext = []() {
+            auto *ctx = new mlir::MLIRContext();
+            //  ^x      ^j  ^k ^v^g    ^d^o  ^v ^h^}  ^k ^l^v ^h^v ^j      ^m  ^e  ^a ^z^d ^v   ^`
+            ctx->allowUnregisteredDialects();
+            return ctx;
+        }();
+        mlir::Type sentinelType = mlir::IntegerType::get(dummyContext, 1);
+
+        return circt::firrtl::PortInfo(  
+            mlir::StringAttr::get(dummyContext, "TOMBSTONE"), // 使用 nullptr 作为上下文  
+            sentinelType,  
+            circt::firrtl::Direction::Out  
+        );  
+    }  
+    static unsigned getHashValue(const circt::firrtl::PortInfo& val) {  
+        return hash_combine(  
+            mlir::hash_value(val.name),  
+            mlir::hash_value(val.type),  
+            (unsigned)val.direction  
+        );  
+    }  
+    static bool isEqual(const circt::firrtl::PortInfo& lhs,  
+                       const circt::firrtl::PortInfo& rhs) {  
+        return lhs.name == rhs.name && lhs.type == rhs.type && lhs.direction == rhs.direction;  
+    }  
+}; 
 
 #include "circt/Dialect/FIRRTL/FIRRTLOpInterfaces.h.inc"
 #endif // CIRCT_DIALECT_FIRRTL_OP_INTERFACES_H

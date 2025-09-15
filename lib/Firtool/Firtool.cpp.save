@@ -12,7 +12,6 @@
 #include "circt/Dialect/FIRRTL/Passes.h"
 #include "circt/Dialect/HW/HWPasses.h"
 #include "circt/Dialect/OM/OMPasses.h"
-#include "circt/Dialect/FIRRTL/spdocInstrPass.h"
 #include "circt/Dialect/SV/SVPasses.h"
 #include "circt/Dialect/Seq/SeqPasses.h"
 #include "circt/Support/Passes.h"
@@ -28,6 +27,8 @@ LogicalResult firtool::populatePreprocessTransforms(mlir::PassManager &pm,
                                                     const FirtoolOptions &opt) {
   // Legalize away "open" aggregates to hw-only versions.
   pm.nest<firrtl::CircuitOp>().addPass(firrtl::createLowerOpenAggsPass());
+  
+  pm.nest<firrtl::CircuitOp>().addPass(firrtl::createspdocInstrPass()); //changed-1
 
   pm.nest<firrtl::CircuitOp>().addPass(firrtl::createResolvePathsPass());
 
@@ -46,9 +47,6 @@ LogicalResult firtool::populatePreprocessTransforms(mlir::PassManager &pm,
 LogicalResult firtool::populateCHIRRTLToLowFIRRTL(mlir::PassManager &pm,
                                                   const FirtoolOptions &opt,
                                                   StringRef inputFilename) {
-
-  pm.nest<firrtl::CircuitOp>().addPass(circt::firrtl::createspdocInstrPass());
-
   pm.nest<firrtl::CircuitOp>().addPass(
       firrtl::createLowerIntrinsicsPass(opt.shouldFixupEICGWrapper()));
 
@@ -387,6 +385,14 @@ namespace {
 /// various bits of a Firtool pipeline. This uses a struct wrapper to avoid the
 /// need for global command line options.
 struct FirtoolCmdOptions {
+  llvm::cl::opt<std::string> {
+      "o",
+      llvm::cl::desc("Output filename, or directory for split output"),
+      llvm::cl::value_desc("filename"),
+      llvm::cl::init("-"),
+  };
+
+
   llvm::cl::opt<std::string> outputFilename{
       "o",
       llvm::cl::desc("Output filename, or directory for split output"),

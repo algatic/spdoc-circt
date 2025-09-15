@@ -1,0 +1,915 @@
+#include "circt/Dialect/FIRRTL/FIRRTLOps.h"
+#include <iostream>
+#include <map>
+#include <set>
+#include <string>
+#include <vector>
+#include <memory>
+#include <set>
+#include <stdexcept>
+#include <algorithm>
+#include <iterator>
+#include <unordered_map>
+#include <unordered_set>
+#include "mlir/Pass/Pass.h"
+#include "circt/Dialect/FIRRTL/FIRRTLOps.h"
+#include "circt/Dialect/FIRRTL/spdocInstrPass.h"
+#include "circt/Dialect/FIRRTL/moduleInfo.h"
+//#include "circt/Dialect/FIRRTL/stateChecker.h"
+
+
+class Node; //说不定应该是class firrtl.node？或者是circt::firrtl::NodeOp？
+//class WDefInstance;
+class Port;
+
+using NodeSet = std::set<Node>;
+using WDefInstanceSet = std::unordered_map<WDefInstance, std::set<std::string>>;
+
+class Node {
+public:
+    circt::firrtl::NodeOp node;
+    std::string name;
+
+    static const std::set<std::string> types;
+
+public:
+    circt::firrtl::NodeOp* node;
+    std::string name;
+
+    Node(circt::firrtl::NodeOp* n, const std::string& nName) : node(n), name(nName) {}
+
+    static Node apply(circt::firrtl::NodeOp* node) { //直接用apply实现了，meaning之后调用的时候加一个node::apply就行，不可以完全直接调用（倒也没什么
+        std::string typeName = node->getTypeName();//取到当前的typename，但这个getTypeName需要定义，在下面补了
+        if (validTypes.find(typeName) == validTypes.end()) {
+            throw std::runtime_error(node->getTypeName() + " is not an instance of Port/DefStatement");
+        }
+
+        std::string name = node->getName();
+        if (name.empty()) {
+            throw std::runtime_error(node->getTypeName() + " does not have a name");
+        }
+
+        return Node(node, name);
+    }
+
+    std::string getTypeName(mlir::Type type) {//现补的
+        std::string typeStr;
+        llvm::raw_string_ostream os(typeStr);
+        type.print(os); // 将类型信息写入字符串
+        os.flush();
+
+        // 处理格式，例如 `firrtl.uint<8>` 变成 `uint`
+        size_t pos = typeStr.find('<');
+        if (pos != std::string::npos) {
+            typeStr = typeStr.substr(0, pos); // 去掉 `<...>` 部分
+        }
+
+        // 去掉前缀方言命名空间 `firrtl.` 或 `std.` 等
+        pos = typeStr.rfind('.');
+        if (pos != std::string::npos) {
+            typeStr = typeStr.substr(pos + 1);
+        }
+
+        return typeStr;
+    }
+
+    static bool hasType(circt::firrtl::NodeOp* node) {
+		return validTypes.find(node->getTypeName()) != validTypes.end();//.end()返回的是一个迭代器，指向最后一个元素的下一个位置
+    }
+
+    //Node(circt::firrtl::NodeOp node, const std::string& name) : node(node), name(name) {}
+
+    // Serialize node as string
+    std::string serialize() const {
+        return node.serialize();
+    }
+
+    // Get a specific type of circt::firrtl::NodeOp
+    template <typename T>
+    T get() const {
+        static_assert(std::is_base_of<circt::firrtl::NodeOp, T>::value, "T must be a subclass of circt::firrtl::NodeOp");
+
+        T result = dynamic_cast<T>(node);
+        if (!result) {
+            throw std::runtime_error(node.serialize() + " mismatch");
+        }
+        return result;
+    }
+
+    // Get class name of the node
+    std::string c() const {
+        return node.getClassName();
+    }
+
+    // Check if the node is used in the expression
+    bool usedIn(const Expression& expr, bool imp = true) const {
+        if (auto ref = dynamic_cast<const WRef*>(&expr)) {
+            return ref->name == name;
+        }
+        else if (auto subfield = dynamic_cast<const WSubField*>(&expr)) {
+            return usedIn(subfield->expr);
+        }
+        else if (auto subindex = dynamic_cast<const WSubIndex*>(&expr)) {
+            return usedIn(subindex->expr);
+        }
+        else if (auto subaccess = dynamic_cast<const WSubAccess*>(&expr)) {
+            return usedIn(subaccess->expr);
+        }
+        else if (auto mux = dynamic_cast<const Mux*>(&expr)) {
+            return imp ? usedIn(mux->cond) || usedIn(mux->tval) || usedIn(mux->fval)
+                : usedIn(mux->tval) || usedIn(mux->fval);
+        }
+        else if (auto doprim = dynamic_cast<const DoPrim*>(&expr)) {
+            bool used = false;
+            for (const auto& arg : doprim->args) {
+                used = used || usedIn(arg);
+            }
+            return used;
+        }
+        return false;
+    }
+
+    // Get the port name from the expression for this node
+    std::set<std::pair<std::string, std::vector<std::string>>> portIn(const Expression& expr) const {
+        auto ret = _getPort(&expr);
+        if (ret.empty()) {
+            throw std::runtime_error("Does not have port: [" + expr.serialize() + "]");
+        }
+        return ret;
+    }
+
+private:
+    // Helper function to retrieve ports in the expression
+    std::set<std::vector<std::string>> _getPort(const Expression& expr) const {
+        std::set<std::vector<std::string>> result;
+
+        if (auto subfield = dynamic_cast<WSubField*>(expr)) {
+            if (auto ref = dynamic_cast<WRef*>(subfield->expr)) {
+                if (ref->name == name) {
+                    result.insert({ subfield->name });
+                }
+            }
+            else {
+                auto nestedPorts = _getPort(subfield->expr);
+                for (auto& port : nestedPorts) {
+                    port.push_back(subfield->name);
+                    result.insert(port);
+                }
+            }
+        }
+        else if (auto subaccess = dynamic_cast<WSubAccess*>(expr)) {
+            auto nestedPorts = _getPort(subaccess->expr);
+            result.insert(nestedPorts.begin(), nestedPorts.end());
+        }
+        else if (auto mux = dynamic_cast<Mux*>(expr)) {
+            auto condPorts = _getPort(mux->cond);
+            auto tvalPorts = _getPort(mux->tval);
+            auto fvalPorts = _getPort(mux->fval);
+            result.insert(condPorts.begin(), condPorts.end());
+            result.insert(tvalPorts.begin(), tvalPorts.end());
+            result.insert(fvalPorts.begin(), fvalPorts.end());
+        }
+        else if (auto doprim = dynamic_cast<DoPrim*>(expr)) {
+            for (const auto& arg : doprim->args) {
+                auto ports = _getPort(arg);
+                result.insert(ports.begin(), ports.end());
+            }
+        }
+        return result;
+    }
+};
+
+// Define the valid types for the Node class
+const std::set<std::string> Node::types = {
+    "Port", "DefWire", "DefRegister", "DefNode", "DefMemory", "WDefInstance"
+};
+
+// Helper function to find the name of the expression (like findName in Scala)
+std::string findName(const Expression& expr) {
+    if (auto ref = dynamic_cast<const WRef*>(&expr)) {
+        return ref->name;
+    }
+    else if (auto subfield = dynamic_cast<const WSubField*>(&expr)) {
+        return findName(*subfield->expr);
+    }
+    else if (auto subindex = dynamic_cast<const WSubIndex*>(&expr)) {
+        return findName(*subindex->expr);
+    }
+    else if (auto subaccess = dynamic_cast<const WSubAccess*>(&expr)) {
+        return findName(*subaccess->expr);
+    }
+    else if (auto reference = dynamic_cast<const Reference*>(&expr)) {
+        return reference->name;
+    }
+    else if (auto field = dynamic_cast<const SubField*>(&expr)) {
+        return findName(*field->expr);
+    }
+    else if (auto index = dynamic_cast<const SubIndex*>(&expr)) {
+        return findName(*index->expr);
+    }
+    else if (auto access = dynamic_cast<const SubAccess*>(&expr)) {
+        return findName(*access->expr);
+    }
+    throw std::runtime_error("Expression does not have a valid name");
+}
+
+std::set<std::string> findNames(const Expression& expr) {
+    std::set<std::string> names;
+    if (auto ref = dynamic_cast<const WRef*>(&expr)) {
+        names.insert(ref->name);
+    }
+    else if (auto subfield = dynamic_cast<const WSubField*>(&expr)) {
+        if (subfield->expr) {
+            auto nestedNames = findNames(*subfield->expr);
+            names.insert(nestedNames.begin(), nestedNames.end());
+        }
+    }
+    else if (auto subindex = dynamic_cast<const WSubIndex*>(&expr)) {
+        if (subindex->expr) {
+            auto nestedNames = findNames(*subindex->expr);
+            names.insert(nestedNames.begin(), nestedNames.end());
+        }
+    }
+    else if (auto subaccess = dynamic_cast<const WSubAccess*>(&expr)) {
+        if (subaccess->expr) {
+            auto nestedNames = findNames(*subaccess->expr);
+            names.insert(nestedNames.begin(), nestedNames.end());
+        }
+    }
+    else if (auto mux = dynamic_cast<const Mux*>(&expr)) {
+        auto condNames = findNames(*mux->cond);
+        auto tvalNames = findNames(*mux->tval);
+        auto fvalNames = findNames(*mux->fval);
+        names.insert(condNames.begin(), condNames.end());
+        names.insert(tvalNames.begin(), tvalNames.end());
+        names.insert(fvalNames.begin(), fvalNames.end());
+    }
+    else if (auto doprim = dynamic_cast<const DoPrim*>(&expr)) {
+        for (const auto& arg : doprim->args) {
+            if (arg) {
+                auto argNames = findNames(*arg);
+                names.insert(argNames.begin(), argNames.end());
+            }
+        }
+    }
+    return names;
+}
+
+
+namespace circt {
+
+    // Define Node and Expression types (these would need to be implemented based on `circt`'s actual types)
+    //class circt::firrtl::NodeOp {};
+    //class DefModule : public circt::firrtl::NodeOp {
+    //public:
+    //    std::string name;
+    //    std::set<std::string> ports;
+    //};
+    //这里需要找到firrtlNode的引用方式，引进来
+
+    class Expression {};  // Placeholder for Expression class
+
+    // The GraphLedger class for tracking nodes, connections, and dependencies
+    class GraphLedger {
+    private:
+        std::unordered_map<std::string, std::vector<std::string>> expG;
+        std::unordered_map<std::string, std::vector<std::string>> G;
+        std::unordered_map<std::string, std::vector<std::string>> R;
+        std::unordered_set<std::string> visited;
+        std::unordered_map<std::string, std::string> Nodes;
+        std::string mName;
+    
+    public:
+        std::set<std::string> mPorts;
+
+        std::map<std::string, std::shared_ptr<Node>> nodes;  // Node map (node name -> Node)
+        std::map<std::string, std::set<std::string>> graph;  // Graph (node -> connected nodes)
+        std::map<std::string, std::set<std::string>> reverseGraph;  // Reverse graph
+
+        std::map<std::string, std::set<std::pair<std::string, std::string>>> rN2IP;
+        std::map<std::string, std::set<std::pair<std::string, std::string>>> rN2MP;
+        std::map<std::pair<std::string, std::string>, std::map<std::string, std::string>> rMP2N;
+        std::map<std::pair<std::string, std::string>, Expression> rIP2E;
+
+        std::map<std::string, Expression> N2E;  // Node -> Expression map
+
+        std::set<std::shared_ptr<DefMemory>> memories;  // Set of memories
+        std::set<std::shared_ptr<WDefInstance>> instances;  // Set of instances
+
+        std::set<std::string> visitedNodes;  // Set of visited nodes
+
+        explicit GraphLedger(std::shared_ptr<DefModule> mod) : mName(mod->name), mPorts(mod->ports) {}
+
+        // Placeholder to get nodes of a certain type (such as DefMemory, WDefInstance)
+        template<typename T>
+        std::set<std::shared_ptr<T>> getNodes() {
+            std::set<std::shared_ptr<T>> result;
+            for (const auto& pair : nodes) {
+                auto node = pair.second;
+                // Assuming T is a type derived from circt::firrtl::NodeOp, we would need to check node type here
+            }
+            return result;
+        }
+
+		std::map<std::pair<std::string, std::string>, Expression> IP2E() {
+			return rIP2E.toMap;
+		}
+
+        // Parses the module and builds the graph
+        void parse() {
+            // Assuming we have a way to distinguish between different module types
+            if (/* module is ExtModule */) {
+                std::cout << mName << " is an external module\n";
+            }
+            else {
+                buildGraph();
+                reverseGraph();
+            }
+        }
+
+        // Build the graph from module data
+        void buildG() {
+            // 遍历模块中的端口和语句，查找节点
+            module->forEachPort([this](std::shared_ptr<circt::firrtl::NodeOp> node) { findNode(node); });
+            module->forEachStmt([this](std::shared_ptr<circt::firrtl::NodeOp> node) { findNode(node); });
+
+            // 根据节点构建图
+            for (const auto& n : G) {
+                std::vector<std::string> sinks;
+                module->forEachStmt([this, &sinks, &n](std::shared_ptr<circt::firrtl::NodeOp> stmt) {
+                    findEdge(Nodes[n.first], sinks);
+                    });
+                G[n.first] = std::set<std::string>(sinks.begin(), sinks.end());
+
+                expG[n.first] = std::set<std::string>();
+            }
+
+            // 处理表达式图
+            for (const auto& n : expG) {
+                std::vector<std::string> sinks;
+                module->forEachStmt([this, &sinks, &n](std::shared_ptr<circt::firrtl::NodeOp> stmt) {
+                    findEdgeExp(Nodes[n.first], sinks);
+                    });
+                expG[n.first] = std::set<std::string>(sinks.begin(), sinks.end());
+            }
+        }
+
+        void reverseG() {
+            // 反向构建图
+            for (const auto& n : G) {
+                std::vector<std::string> sources;
+                for (const auto& m : G) {
+                    if (m.second.find(n.first) != m.second.end()) {
+                        sources.push_back(m.first);
+                    }
+                }
+                R[n.first] = std::set<std::string>(sources.begin(), sources.end());
+            }
+        }
+
+        void findNode(std::shared_ptr<circt::firrtl::NodeOp> s) {
+            if (Node::hasType(s)) {
+                std::shared_ptr<Node> n = std::make_shared<Node>(s, "someName");  // 实际上会用节点的名字
+                Nodes[n->name] = n;
+                G[n->name] = std::set<std::string>();
+            }
+
+            if (auto stmt = std::dynamic_pointer_cast<Statement>(s)) {
+                stmt->forEachStmt([this](std::shared_ptr<circt::firrtl::NodeOp> stmt) { findNode(stmt); });
+            }
+        }
+
+        // Clear visited nodes
+        void clear() {
+            visitedNodes.clear();
+        }
+
+        void findEdgeExp(std::shared_ptr<Node> n, std::vector<std::string>& sinks, std::shared_ptr<Statement> s) {
+            if (auto reg = std::dynamic_pointer_cast<DefRegister>(s)) {
+                if (n->usedIn(reg->reset, false)) {
+                    sinks.push_back(reg->name);
+                }
+            }
+            else if (auto nod = std::dynamic_pointer_cast<DefNode>(s)) {
+                if (n->usedIn(nod->value, false)) {
+                    sinks.push_back(nod->name);
+                }
+            }
+            else if (auto connect = std::dynamic_pointer_cast<Connect>(s)) {
+                // 假设 Connect 的处理逻辑
+                if (n->usedIn(connect->expression, false)) {
+                    sinks.push_back(Node::findName(connect->left));
+                }
+            }
+
+            s->forEachStmt([this, n, &sinks](std::shared_ptr<circt::firrtl::NodeOp> stmt) {
+                findEdgeExp(n, sinks, std::dynamic_pointer_cast<Statement>(stmt));
+                });
+        }
+
+        void findEdge(std::shared_ptr<Node> n, std::vector<std::string>& sinks, std::shared_ptr<Statement> s) {
+            if (auto reg = std::dynamic_pointer_cast<DefRegister>(s)) {
+                if (n->usedIn(reg->reset)) {
+                    sinks.push_back(reg->name);
+                }
+            }
+            else if (auto nod = std::dynamic_pointer_cast<DefNode>(s)) {
+                if (n->usedIn(nod->value)) {
+                    sinks.push_back(nod->name);
+                    updateN2XP(nod->name, nod->value, n);
+                }
+                updateN2E(nod->name, nod->value);
+            }
+            else if (auto connect = std::dynamic_pointer_cast<Connect>(s)) {
+                std::string lName = Node::findName(connect->left);
+                if (n->usedIn(connect->expression)) {
+                    sinks.push_back(lName);
+                    updateN2XP(lName, connect->expression, n);
+                    updateXP2X(lName, connect->left, connect->expression, n);
+                }
+                updateN2E(lName, connect->expression);
+            }
+
+            s->forEachStmt([this, n, &sinks](std::shared_ptr<circt::firrtl::NodeOp> stmt) {
+                findEdge(n, sinks, std::dynamic_pointer_cast<Statement>(stmt));
+                });
+        }
+
+        void updateN2XP(const std::string& sink, std::shared_ptr<Expression> srcE, std::shared_ptr<Node> node) {
+            if (node->type == "WDefInstance") {
+                rN2IP[sink].insert(node->portIn(srcE).begin(), node->portIn(srcE).end());
+            }
+            else if (node->type == "DefMemory") {
+                rN2MP[sink].insert(node->portIn(srcE).begin(), node->portIn(srcE).end());
+            }
+        }
+
+        void updateXP2X(const std::string& sink, std::shared_ptr<Expression> sinkE, std::shared_ptr<Expression> srcE, std::shared_ptr<Node> node) {
+            bool instanceExists = instances.find(sink) != instances.end();
+            bool memoryExists = memorys.find(sink) != memorys.end();
+
+            if (instanceExists && memoryExists) {
+                throw std::runtime_error(sink + " contains in both instances and memorys");
+            }
+
+            if (instanceExists && !memoryExists) {
+                auto IP = Nodes[sink]->portIn(sinkE).front();  // Only one port is connected at once
+                rIP2E[{IP.first, IP.second.front()}] = srcE;
+            }
+            else if (!instanceExists && memoryExists) {
+                auto MPF = Nodes[sink]->portIn(sinkE).front();  // Only one port is connected at once
+                auto MP = std::make_pair(MPF.first, MPF.second.front());
+                rMP2N[MP][MPF.second.back()] = node->name;
+            }
+        }
+
+        void updateN2E(const std::string& sink, std::shared_ptr<Expression> srcE) {
+            if (Nodes[sink]->node->c == "WDefInstance" || Nodes[sink]->node->c == "DefMemory") {
+                return;
+            }
+
+            if (N2E.find(sink) != N2E.end()) {
+                return;
+            }
+
+            N2E[sink] = srcE;
+        }
+
+        std::map<std::string, std::pair<std::string, std::set<std::pair<std::string, std::set<std::string>>>>>
+            getInstanceMap() {
+            std::vector<std::tuple<std::shared_ptr<Node>, std::string, std::set<std::string>>> I2IP;
+
+            for (auto& instance : instances) {
+                visited.clear();
+                auto [srcs, ips] = findNodeSrcs({ instance.first }); // 获取所有上游节点和通数据的端口
+                for (auto& src : srcs["WDefInstance"]) {
+                    I2IP.push_back({ src, instance.first, ips[src->get<WDefInstance>()] });
+                }
+            }
+
+            std::map<std::string, std::pair<std::string, std::vector<std::pair<std::string, std::set<std::string>>>>> result;
+            for (auto& instance : instances) {
+                std::vector<std::pair<std::string, std::set<std::string>>> sink_srcPs;
+
+                for (auto& [srcN, sink, ports] : I2IP) {
+                    if (srcN->get<WDefInstance>() == instance.second) {
+                        sink_srcPs.push_back({ sink, ports });
+                    }
+                }
+
+                result[instance.first] = { instance.second->module, sink_srcPs };
+            }
+
+            return result;
+        }
+
+        std::tuple<std::map<std::string, std::set<Node>>, std::map<WDefInstance, std::set<std::string>>> findPortSrcs(const std::set<std::string>& ports) {
+            // ports should be subset of outward ports of module
+            // Current design cannot discriminate outward ports and inward ports,
+            // so just select only outward
+            assert(std::includes(mPorts.begin(), mPorts.end(), ports.begin(), ports.end()),
+                (mName + " does not have ports: " + std::to_string(ports.diff(mPorts))));
+
+            auto oPorts = ports;
+            oPorts.intersect(mPorts.filter([](const auto& port) { return port.direction == Output; }).map([](const auto& port) { return port.name; }));
+
+            return findNodeSrcs(oPorts);
+        }
+        
+        std::tuple<std::map<std::string, std::set<Node>>, std::map<WDefInstance, std::set<std::string>>> findExprSrcs(const std::set<Expression>& exprs) {
+            std::set<std::string> exprNodes;
+            for (const auto& expr : exprs) {
+                exprNodes.insert(Node::findNames(expr));
+            }
+
+            // Select exact (input) ports
+            auto inPorts = mPorts.filter([](const auto& port) { return port.direction == Input; }).map([](const auto& port) { return port.name; });
+            auto inputs = exprNodes.intersect(inPorts).diff(visited);
+            visited.insert(inputs.begin(), inputs.end());
+
+            // Select memorys
+            auto mems = exprNodes.intersect(memorys.map([](const auto& mem) { return mem.name; })).diff(visited);
+            visited.insert(mems.begin(), mems.end());
+
+            // Select instances (and its port)
+            auto insts = exprNodes.intersect(instances.map([](const auto& inst) { return inst.name; })).map(Nodes);
+            auto iPorts = insts.map([](const auto& inst) {
+                return std::make_pair(inst.get<WDefInstance>(), exprs.filter(inst.usedIn(_)).flatMap(inst.portIn).map([](const auto& port) { return port._2.head(); }));
+                });
+
+            auto [iNodes, oIPorts, iMems] = findOutPortsConnected(iPorts);
+
+            auto nodes = exprNodes.diff(insts.map([](const auto& inst) { return inst.name; }).insert(mems.begin(), mems.end()) + iNodes);
+            auto [nodeSrcs, instPorts] = findNodeSrcs(nodes);
+
+            std::map<std::string, std::set<Node>> retNodeSrcs;
+            retNodeSrcs["DefRegister"] = nodeSrcs["DefRegister"];
+            retNodeSrcs["DefMemory"] = nodeSrcs["DefMemory"].insert(mems.begin(), mems.end()).insert(iMems.begin(), iMems.end());
+            retNodeSrcs["WDefInstance"] = nodeSrcs["WDefInstance"].insert(oIPorts.begin(), oIPorts.end());
+            retNodeSrcs["Port"] = nodeSrcs["Port"].insert(inputs.begin(), inputs.end());
+
+            std::map<std::string, std::set<Node>> retInstPorts;
+            for (const auto& key : oIPorts.keys() + instPorts.keys()) {
+                retInstPorts[key] = oIPorts.get(key).insert(instPorts.get(key));
+            }
+
+            return std::make_tuple(retNodeSrcs, retInstPorts);
+        }
+        
+        std::tuple<std::set<std::string>, std::map<WDefInstance, std::set<std::string>>, std::set<std::string>> findOutPortsConnected(const std::map<WDefInstance, std::set<std::string>>& ips) {
+            auto oIPorts = ips.map([](const auto& pair) {
+                return std::make_pair(pair.first, pair.second.filter([](const auto& port) {
+                    return !rIP2E.keySet.contains(std::make_pair(pair.first.name, port));
+                    }));
+                }).filter([](const auto& pair) { return !pair.second.empty(); });
+
+            auto exprs = rIP2E.filterKeys(ips.map([](const auto& pair) {
+                return pair.second.map([&](const auto& port) { return std::make_pair(pair.first.name, port); });
+                }).flatten().contains).values().toSet();
+            auto exprNodes = exprs.flatMap(Node::findNames);
+
+            auto insts = exprNodes.intersect(instances.map([](const auto& inst) { return inst.name; }));
+            auto mems = exprNodes.intersect(memorys.map([](const auto& mem) { return mem.name; }));
+            auto nodes = exprNodes.diff(insts + mems);
+
+            auto iPorts = insts.map([](const auto& inst) {
+                auto n = Nodes(inst);
+                return std::make_pair(n.get<WDefInstance>(), exprs.filter(n.usedIn(_)).flatMap(n.portIn).map([](const auto& port) { return port._2.head(); }));
+                }).filter([](const auto& pair) { return !pair.second.empty(); });
+
+            if (iPorts.empty()) {
+                return std::make_tuple(nodes, oIPorts, mems);
+            }
+            else {
+                auto cont = findOutPortsConnected(iPorts);
+                auto retOIPorts = (oIPorts.keys() + cont.second.keys()).map([](const auto& key) {
+                    return std::make_pair(key, oIPorts.get(key).insert(cont.second.get(key)));
+                    }).toMap();
+                return std::make_tuple(nodes + cont.first, retOIPorts, mems + cont.third);
+            }
+        }
+        
+        std::pair<std::map<std::string, std::set<Node>>, WDefInstanceSet> findNodeSrcs(const std::set<std::string>& nodes) {
+            std::map<std::string, std::vector<Node>> nodeSrcs{
+                {"DefRegister", {}}, {"DefWire", {}}, {"DefNode", {}}, {"DefMemory", {}},
+                {"WDefInstance", {}}, {"Port", {}}
+            };
+            WDefInstanceSet instPorts;
+
+            std::set<std::string> visited;
+
+            // Logic to process nodes
+            for (const auto& n : nodes) {
+                auto fSrcs = R(n); // R function logic is assumed to be defined elsewhere
+                visited.insert(n);
+
+                for (const auto& src : fSrcs) {
+                    auto srcNodes = findSrcs(src, n); // Assuming findSrcs is implemented elsewhere
+                    for (const auto& sn : srcNodes) {
+                        // Here we classify based on node type
+                        auto nodeType = Nodes(src.first).c;
+                        if (nodeType == "DefRegister") {
+                            nodeSrcs["DefRegister"].push_back(Nodes(src.first));
+                        }
+                        else if (nodeType == "DefWire") {
+                            nodeSrcs["DefWire"].push_back(Nodes(src.first));
+                        }
+                        else if (nodeType == "DefNode") {
+                            nodeSrcs["DefNode"].push_back(Nodes(src.first));
+                        }
+                        else if (nodeType == "DefMemory") {
+                            nodeSrcs["DefMemory"].push_back(Nodes(src.first));
+                        }
+                        else if (nodeType == "WDefInstance") {
+                            instPorts[Nodes(src.first).get<WDefInstance>()] = src.second;
+                            nodeSrcs["WDefInstance"].push_back(Nodes(src.first));
+                        }
+                        else if (nodeType == "Port") {
+                            if (Nodes(src.first).get<Port>().direction == "Input" && src.first != "clock" && src.first != "reset") {
+                                nodeSrcs["Port"].push_back(Nodes(src.first));
+                            }
+                        }
+                        else {
+                            throw std::runtime_error("Node type not recognized: " + src.first);
+                        }
+                    }
+                }
+            }
+
+            std::map<std::string, std::set<Node>> resultNodeSrcs;
+            for (auto& pair : nodeSrcs) {
+                resultNodeSrcs[pair.first] = std::set<Node>(pair.second.begin(), pair.second.end());
+            }
+
+            return { resultNodeSrcs, instPorts };
+        }
+
+        bool isStatePreserving(const DefRegister& reg) {
+            auto sources = R(reg.name); // Assuming R is a function that returns sources for a register
+            for (const auto& src : sources) {
+                if (Nodes(src).c == "DefRegister" && src == reg.name) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        std::map<std::string, std::set<DefRegister>> findVecRegs(const std::set<DefRegister>& regs) {
+            std::map<Info, std::vector<DefRegister>> infoRegMap;
+
+            // Group registers by their info
+            for (const auto& reg : regs) {
+                if (std::find(infoRegMap[reg.info].begin(), infoRegMap[reg.info].end(), reg) == infoRegMap[reg.info].end()) {
+                    infoRegMap[reg.info].push_back(reg);
+                }
+            }
+
+            std::map<std::string, std::set<DefRegister>> retInfoRegs;
+
+            for (const auto& pair : infoRegMap) {
+                const auto& seq = pair.second;
+                if (pair.first.getClassName() != "NoInfo" && seq.size() >= 2) {
+                    std::vector<std::string> regs;
+                    for (const auto& reg : seq) {
+                        regs.push_back(reg.name);
+                    }
+
+                    // Find common prefix
+                    std::string prefix = regs.front();
+                    for (const auto& reg : regs) {
+                        prefix = findCommonPrefix(prefix, reg); // Assuming findCommonPrefix is implemented
+                    }
+
+                    if (prefix.length() > 0) {
+                        std::map<int, std::vector<std::string>> vElems;
+                        for (const auto& reg : regs) {
+                            auto body = reg.substr(prefix.length());
+                            if (body.length() > 0 && std::isdigit(body[0])) {
+                                int idx = std::stoi(body);
+                                vElems[idx].push_back(body);
+                            }
+                        }
+
+                        bool isVector = std::all_of(vElems.begin(), vElems.end(),
+                            [](const auto& elem) { return elem.second.size() == vElems.begin()->second.size(); });
+
+                        if (isVector) {
+                            retInfoRegs[prefix] = std::set<DefRegister>(seq.begin(), seq.end());
+                        }
+                    }
+                }
+            }
+
+            return retInfoRegs;
+        }
+        
+        std::vector<std::pair<std::string, std::optional<std::string>>> findSrcs(const std::string& sink, const std::string& prev) {
+            if (R.find(sink) == R.end()) {
+                throw std::runtime_error("R does not contain " + sink);
+            }
+            if (visited.find(sink) != visited.end()) {
+                return {};
+            }
+
+            const auto& sources = R[sink];
+
+            // WDefInstance 和 DefMemory 特殊处理
+            if (Nodes[sink].c != "WDefInstance" && Nodes[sink].c != "DefMemory") {
+                visited.insert(sink);
+            }
+
+            std::vector<std::pair<std::string, std::optional<std::string>>> result;
+
+            if (Nodes[sink].c == "WDefInstance") {
+                for (const auto& x : rN2IP[prev]) {
+                    result.emplace_back(x.first, x.second);
+                }
+            }
+            else if (Nodes[sink].c == "DefMemory") {
+                std::set<std::string> cons;
+                for (const auto& x : rN2MP[prev]) {
+                    if (rMP2N.find(x) != rMP2N.end()) {
+                        for (const auto& [key, value] : rMP2N[x]) {
+                            if (value.empty()) {
+                                continue;
+                            }
+                            cons.insert(value);
+                        }
+                    }
+                }
+                for (const auto& x : rN2MP[prev]) {
+                    result.emplace_back(x.first, x.second);
+                }
+                for (const auto& c : cons) {
+                    auto subResults = findSrcs(c, sink);
+                    result.insert(result.end(), subResults.begin(), subResults.end());
+                }
+            }
+            else {
+                result.emplace_back(sink, std::nullopt);
+            }
+
+            for (const auto& str : sources) {
+                if (Nodes[sink].c != "WDefInstance" && Nodes[sink].c != "DefMemory") {
+                    auto subResults = findSrcs(str, sink);
+                    result.insert(result.end(), subResults.begin(), subResults.end());
+                }
+            }
+
+            return result;
+        }
+
+        // 查找指定节点的所有下游节点
+        std::set<std::string> findNodeSinks(const std::string& n) {
+            std::set<std::string> sinks = findSinks(n);
+            return getOuter(sinks);
+        }
+
+        // 处理内存节点的下游节点
+        std::pair<std::set<std::string>, std::set<std::string>> findMemSinks(const Memory& mem) {
+            std::set<std::string> addrs;
+            std::set<std::string> datas;
+
+            for (const auto& [k, map] : rMP2N) {
+                if (k.first == mem.name &&
+                    std::find(mem.readers.begin(), mem.readers.end(), k.second) != mem.readers.end()) {
+                    if (map.find("addr") != map.end()) {
+                        addrs.insert(map.at("addr"));
+                    }
+                }
+            }
+
+            for (const auto& [n, mp] : rN2MP) {
+                for (const auto& x : mp) {
+                    if (x.first == mem.name &&
+                        std::find(mem.readers.begin(), mem.readers.end(), x.second) != mem.readers.end()) {
+                        datas.insert(n);
+                    }
+                }
+            }
+
+            std::set<std::string> nodes;
+            for (const auto& data : datas) {
+                auto sinks = findSinks(data);
+                nodes.insert(sinks.begin(), sinks.end());
+            }
+
+            return { addrs, getOuter(nodes) };
+        }
+
+        // 过滤出不在 sinks 集合中的外部节点
+        std::set<std::string> getOuter(const std::set<std::string>& sinks) {
+            std::set<std::string> nodes;
+
+            for (const auto& [s, e] : N2E) {
+                if (sinks.find(s) != sinks.end()) {
+                    for (const auto& expr : e) {
+                        if (expr == "Mux") {
+                            auto foundNames = findNames(expr); // 这里 findNames 需要具体实现
+                            nodes.insert(foundNames.begin(), foundNames.end());
+                        }
+                        else if (expr == "DoPrim" && expr == "eq") {
+                            auto foundNames = findNames(expr); // 这里也是需要具体实现
+                            nodes.insert(foundNames.begin(), foundNames.end());
+                        }
+                    }
+                }
+            }
+
+            for (const auto& s : sinks) {
+                nodes.erase(s);
+            }
+
+            return nodes;
+        }
+
+        std::vector<std::string> findSinks(const std::string& source) {
+            if (expG.find(source) == expG.end()) {
+                throw std::runtime_error("G does not contain " + source);
+            }
+
+            if (visited.find(source) != visited.end()) {
+                return {};
+            }
+
+            visited.insert(source);
+            std::vector<std::string> sinks = expG[source];
+            std::vector<std::string> result = { source };
+
+            for (const auto& str : sinks) {
+                if (Nodes[str] == "WDefInstance" || Nodes[str] == "DefMemory") {
+                    continue;
+                }
+
+                auto recursiveResults = findSinks(str);
+                result.insert(result.end(), recursiveResults.begin(), recursiveResults.end());
+            }
+            return result;
+        }
+
+        std::unordered_set<std::string> filterOut(const std::unordered_set<std::string>& nodes) {
+            std::unordered_set<std::string> outNames;
+            for (const auto& node : nodes) {
+                if (Nodes[node] == "DefRegister" || Nodes[node] == "DefMemory") {
+                    outNames.insert(node);
+                }
+                else {
+                    throw std::runtime_error(node + " is not reg/mem");
+                }
+            }
+
+            std::unordered_set<std::string> result;
+            for (const auto& [key, value] : Nodes) {
+                if (value == "DefRegister" || value == "DefMemory") {
+                    if (outNames.find(key) == outNames.end()) {
+                        result.insert(key);
+                    }
+                }
+            }
+            return result;
+        }
+
+        void printLog() {
+            std::cout << "====================" << mName << "=========================" << std::endl;
+            std::cout << "---------R---------" << std::endl;
+            // R map print logic needs to be implemented
+            std::cout << "\n";
+
+            std::cout << "---------rN2IP---------" << std::endl;
+            // rN2IP print logic needs to be implemented
+            std::cout << "\n";
+
+            std::cout << "---------rIP2E---------" << std::endl;
+            // rIP2E print logic needs to be implemented
+            std::cout << "\n";
+
+            std::cout << "---------rN2MP---------" << std::endl;
+            // rN2MP print logic needs to be implemented
+            std::cout << "\n";
+
+            std::cout << "---------rMP2N---------" << std::endl;
+            // rMP2N print logic needs to be implemented
+            std::cout << "\n";
+        }
+
+        std::pair<int, int> getStat() {
+            int regCount = 0;
+            int memCount = 0;
+            for (const auto& [_, value] : Nodes) {
+                if (value == "DefRegister") {
+                    regCount++;
+                }
+                else if (value == "DefMemory") {
+                    memCount++;
+                }
+            }
+            return { regCount, memCount };
+        }
+    };
+
+    // Node class (placeholder)
+    class DefMemory : public circt::firrtl::NodeOp {};
+    class WDefInstance : public circt::firrtl::NodeOp {};
+
+}  // namespace circt
+

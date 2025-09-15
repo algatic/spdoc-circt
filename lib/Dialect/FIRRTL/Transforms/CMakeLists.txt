@@ -55,6 +55,10 @@ add_circt_dialect_library(CIRCTFIRRTLTransforms
   VBToBV.cpp
   Vectorization.cpp
   WireDFT.cpp
+  spdocInstrPass.cpp
+  graphLedger.cpp
+  moduleInfo.cpp
+  stateChecker.cpp
 
   DEPENDS
   CIRCTFIRRTLTransformsIncGen
