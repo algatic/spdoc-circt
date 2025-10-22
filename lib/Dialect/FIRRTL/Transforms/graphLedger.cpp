@@ -1,5 +1,6 @@
-#include <tuple>
 #include "circt/Dialect/FIRRTL/FIRRTLOps.h"  
+#include "circt/Dialect/FIRRTL/FIRRTLTypes.h"
+#include <tuple>
 #include "mlir/IR/Location.h"  
 #include "llvm/ADT/DenseMap.h"  
 #include "llvm/ADT/StringRef.h"  
@@ -12,8 +13,6 @@
 #include "circt/Dialect/FIRRTL/graphLedger.h"
 #include "circt/Dialect/FIRRTL/moduleInfo.h"
 #include "circt/Dialect/FIRRTL/stateChecker.h"
-#include "circt/Dialect/FIRRTL/FIRRTLOps.h"
-#include "circt/Dialect/FIRRTL/FIRRTLTypes.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/SymbolTable.h"
 #include "llvm/ADT/DenseMap.h"
@@ -30,6 +29,15 @@
 
 using namespace circt;
 using namespace firrtl;
+using namespace circt::firrtl;
+
+static bool isStatement(Operation *op) {  
+  return isa<AttachOp, ConnectOp, RefDefineOp,  
+             ForceOp, PrintFOp, SkipOp, StopOp>(op) ||  
+         isa<WhenOp, AssertOp, AssumeOp, CoverOp, PropAssignOp,  
+             RefForceOp, RefForceInitialOp, RefReleaseOp>(op) ||    
+         isa<LayerBlockOp, MatchOp>(op);  
+}
 
 using StringSet = std::set<std::string>;
 using StringToStringSetMap = std::map<std::string, std::set<std::string>>;
@@ -517,9 +525,12 @@ void circt::firrtl::graphLedger::findNode(mlir::Operation* s) {
         Nodes[n.name] = n;
         G[n.name] = llvm::SmallVector<std::string>();
     }
-    s->walk([&](Operation *op){
-        findNode(op);
-    });
+    //if(isStatement(s)){
+    //s->walk([&](Operation *op){
+        //if(isStatement(op)){
+        //findNode(op);}
+    //});
+    //}
 }
 
 void circt::firrtl::graphLedger::findNode(PortInfo portInfo){
@@ -550,11 +561,13 @@ void circt::firrtl::graphLedger::findEdgeExp(Node n, SmallVector<std::string>& s
     }
 
     // Recursively traverse nested statements  
-    stmt->walk([&](Operation* nestedOp) {
-        if (nestedOp != stmt) {
-            findEdgeExp(n, sinks, nestedOp);
-        }
-    });
+    //if(isStatement(stmt)){
+    //stmt->walk([&](Operation* nestedOp) {
+        //if (nestedOp != stmt) {
+            //if(isStatement(nestedOp)){
+            //findEdgeExp(n, sinks, nestedOp);}
+        //}
+    //});//}
 } //这个是那个firrtlnode的替代！这个typege
 
 void circt::firrtl::graphLedger::buildG() {
@@ -565,17 +578,21 @@ void circt::firrtl::graphLedger::buildG() {
         findNode(portInfo);  
     }
     //module->foreachStmt([this](std::shared_ptr<mlir::Operation*> node) { findNode(node); });
+    //if(isStatement(module)){
     module->walk([&](mlir::Operation *op){
-        findNode(op);
-    });
+        if(isStatement(op)){
+        findNode(op);}
+    });//}
     //o，不用害怕，是我的四个号（。
     // 根据节点构建图
     for (const auto& n : G) {
         SmallVector<std::string> sinks;
         //module->foreachStmt([this, &sinks, &n](std::shared_ptr<mlir::Operation*> stmt) {//[]里面是当前环境要提供的，括号里是方法本身要提供的
+        //if(isStatement(module)){
         module->walk([&](Operation *op){
-            findEdge(Nodes[n.first], sinks, op);
-            });
+            if(isStatement(op)){
+            findEdge(Nodes[n.first], sinks, op);}
+            });//}
         G[n.first] = SmallVector<std::string>(sinks.begin(), sinks.end());
 
         expG[n.first] = SmallVector<std::string>();
@@ -585,9 +602,11 @@ void circt::firrtl::graphLedger::buildG() {
     for (const auto& n : expG) {
         SmallVector<std::string> sinks;
         //module->forEachStmt([this, &sinks, &n](std::shared_ptr<mlir::Operation*> stmt) {
+        //if(isStatement(module)){
         module->walk([&](Operation *op){
-            findEdgeExp(Nodes[n.first], sinks, op);
-            });
+            if(isStatement(op)){
+            findEdgeExp(Nodes[n.first], sinks, op);}
+            });//}
         expG[n.first] = SmallVector<std::string>(sinks.begin(), sinks.end());
     }
 }
@@ -644,11 +663,13 @@ void circt::firrtl::graphLedger::findEdge(circt::firrtl::Node n, SmallVector<std
     // Handle other cases like Port, DefWire, DefMemory, WDefInstance as needed  
 
     // Recursively traverse nested statements  
-    s->walk([&](Operation* nestedOp) {
-        if (nestedOp != s) {
-            findEdge(n, sinks, nestedOp);
-        }
-        });
+    //if(isStatement(s)){
+    //s->walk([&](Operation* nestedOp) {
+        //if (nestedOp != s) {
+            //if(isStatement(nestedOp)){
+            //findEdge(n, sinks, nestedOp);}
+        //}
+        //});//}
 } //这个是那个firrtlnode的替代！这个type
 
 void circt::firrtl::graphLedger::updateN2XP(const std::string& sink, mlir::Value srcE, Node& node) {

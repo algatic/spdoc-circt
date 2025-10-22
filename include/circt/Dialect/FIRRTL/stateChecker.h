@@ -41,6 +41,7 @@ using namespace firrtl;
 namespace circt {
 namespace firrtl {
 class Node; // 前向声明（若头文件已包含）
+//bool isStatement(mlir::Operation *op);
 } // namespace firrtl
 } // namespace circt
 
@@ -60,6 +61,8 @@ using ComplexTuple_connected = std::pair<StringToNodeSetMap, WDefInstanceToStrin
 
 namespace circt {
 namespace firrtl {
+
+//static bool isStatement(mlir::Operation *op);
 
 class RegisterResult {
   mlir::Operation* op_; //   ^x ^b  ^n^=  ^k ^s^m  ^| ^l^g ^r^h

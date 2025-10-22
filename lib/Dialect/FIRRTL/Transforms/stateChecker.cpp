@@ -1,7 +1,7 @@
-#include "circt/Dialect/FIRRTL/spdocInstrPass.h"
-#include "circt/Dialect/FIRRTL/graphLedger.h"
-#include "circt/Dialect/FIRRTL/moduleInfo.h"
-#include "circt/Dialect/FIRRTL/stateChecker.h"
+//#include "circt/Dialect/FIRRTL/spdocInstrPass.h"
+//#include "circt/Dialect/FIRRTL/graphLedger.h"
+//#include "circt/Dialect/FIRRTL/moduleInfo.h"
+//#include "circt/Dialect/FIRRTL/stateChecker.h"
 #include "circt/Dialect/FIRRTL/FIRRTLOps.h"
 #include "circt/Dialect/FIRRTL/FIRRTLTypes.h"
 #include "mlir/IR/Operation.h"
@@ -17,11 +17,23 @@
 #include <random>
 #include <iostream>
 #include "circt/Dialect/FSM/FSMOps.h"
+#include "circt/Dialect/FIRRTL/spdocInstrPass.h"
+#include "circt/Dialect/FIRRTL/graphLedger.h"
+#include "circt/Dialect/FIRRTL/moduleInfo.h"
+#include "circt/Dialect/FIRRTL/stateChecker.h"
 //#define GEN_PASS_DEF_SPDOCINSTRPASS
 //#include "circt/Dialect/FIRRTL/Passes.h.inc"
 
 using namespace circt;
 using namespace firrtl;
+
+static bool isStatement(Operation *op) {
+  return isa<AttachOp, ConnectOp, RefDefineOp,
+             ForceOp, PrintFOp, SkipOp, StopOp>(op) ||
+         isa<WhenOp, AssertOp, AssumeOp, CoverOp, PropAssignOp,
+             RefForceOp, RefForceInitialOp, RefReleaseOp>(op) ||
+         isa<LayerBlockOp, MatchOp>(op);
+}
 
 using StringSet = std::set<std::string>;
 using StringToStringSetMap = std::map<std::string, std::set<std::string>>;
@@ -864,16 +876,22 @@ void circt::firrtl::stateChecker::findTopInst(std::vector<InstanceOp>& insts, ml
 		if (instOp.getModuleName() == topModuleName_) {
 			insts.push_back(instOp);
 		}
-	}
+	}//else{
 
 	// 递归遍历所有子操作  
-	for (auto& region : op->getRegions()) {
-		for (auto& block : region) {
-			for (auto& childOp : block) {
-				findTopInst(insts, &childOp);
-			}
-		}
-	}
+	//for (auto& region : op->getRegions()) {
+	//	for (auto& block : region) {
+	//		for (auto& childOp : block) {
+	//			findTopInst(insts, &childOp);
+	//		}
+	//	}
+	//}
+            //op->walk([&](Operation *nestedOp){
+                //if(isStatement(nestedOp)){
+                    //findTopInst(insts, nestedOp);
+                //}
+            //});
+        //}
 }
 
 // 连接spec doctor端口  
@@ -1244,7 +1262,12 @@ FModuleOp circt::firrtl::stateChecker::instrument(
 
 		// Find the top module instance  
 		std::vector<InstanceOp> topInstances;
-		findTopInst(topInstances, module.getOperation());
+		//findTopInst(topInstances, module.getOperation());
+                module->walk([&](Operation *op){
+                    if(isStatement(op)){
+                        findTopInst(topInstances, op);
+                    }
+                });
 
 		if (topInstances.size() != 1) {
 			if (topInstances.empty()) {

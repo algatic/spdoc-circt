@@ -50,6 +50,7 @@ using ComplexTuple_connected = std::pair<StringToNodeSetMap, WDefInstanceToStrin
 
 namespace circt {
 namespace firrtl {
+//static bool isStatement(mlir::Operation *op);
 class Node {
 private:
     //static std::set<std::string>& types;
