@@ -482,7 +482,7 @@ void circt::firrtl::SpdocInstrPass::runOnOperation() {
     std::set<llvm::StringRef> intmMs;
     // 过滤中间模块  
     for (auto& moduleName : parentMs) {
-        // 假设 circuit.lookupModule(pMod) 叻�找到 FModuleOp  
+        // 假设 circuit.lookupModule(pMod) 叻�找到 FModuleOp  
         //circt::firrtl::FModuleOp pModOp = circuitOp.lookupModule<circt::firrtl::FModuleOp>(pMod);
         
         llvm::StringRef moduleNameStr = moduleName;  
@@ -512,7 +512,6 @@ void circt::firrtl::SpdocInstrPass::runOnOperation() {
         if (atkRegMap.count(moduleName)) {
             regs = atkRegMap.at(moduleName);
         }
-
         // 调用 StateChecker 的 instrument 方法  
         // 注意：instrument 方法在C++版本中返回 FModuleOp，  
         // 但由于MLIR的IR是可变的，通常直接在函数内部修改模块，而不是返回新模块。  

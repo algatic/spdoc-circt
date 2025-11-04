@@ -1137,6 +1137,11 @@ FModuleOp circt::firrtl::stateChecker::instrument(
 
 	auto builder = OpBuilder::atBlockBegin(module.getBodyBlock());
 	auto loc = module.getLoc();
+	
+	if (mName_.data() == nullptr) {  
+  		llvm::errs() << "Error: mName_ is invalid\n";  
+  		return;  
+	}
 
 	// Check if this module should be instrumented  
 	if (modules_.find(mName_) != modules_.end()) {
@@ -1150,10 +1155,10 @@ FModuleOp circt::firrtl::stateChecker::instrument(
 		auto ports = module.getPorts();  
 		size_t portIndex = 0;  
 		for (size_t i = 0; i < ports.size(); ++i) {  
-    			if (ports[i].getName() == clockPort.value().getName()) {  
-        			portIndex = i;  
-        			break;  
-    			}  
+    		if (ports[i].getName() == clockPort.value().getName()) {  
+        		portIndex = i;  
+        		break;  
+    		}  
 		}
 		mlir::Value clockValue = module.getArgument(portIndex);
 		clock_ = builder.create<RefSendOp>(loc, clockValue);//module.getArgument(getPortIndex(module, clockPort->getName()));

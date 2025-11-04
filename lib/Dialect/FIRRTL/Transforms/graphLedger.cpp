@@ -115,7 +115,7 @@ template <typename T > T circt::firrtl::Node::get() {
     Operation* op = std::get<Operation*>(node);
     if (auto result = dyn_cast<T>(op)) {
         return result;
-    }//“你想做1啊？”我笑死了谁能像我看刘小别哑然失笑一样来欣赏我这句如何意味深长（所以后面得做吧，i reckon，得来一下证明一下吧
+    }
     else {
         std::string serialized = serialize();  // Use the serialize method from previous conversion  
         llvm::errs() << serialized << " mismatch";
@@ -432,9 +432,12 @@ llvm::StringRef circt::firrtl::Node::findName(mlir::Value expr) {
     else if (auto openSubindexOp = dyn_cast<OpenSubindexOp>(defOp)) {
         return findName(openSubindexOp.getInput());
     }
+    else if (auto instanceOp = dyn_cast<InstanceOp>(defOp)) {
+        return instanceOp.getName();
+    }
     else {
         // For operations like Mux, primitives, etc.  
-        llvm::errs() << "Expression does not have a statement name";
+        llvm::errs() << defOp->getName().getStringRef() << "does not have a statement name";
     }
 }
 llvm::SetVector<llvm::StringRef> circt::firrtl::Node::findNames(Value expr) {
